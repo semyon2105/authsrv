@@ -1,0 +1,3 @@
+listen_addr = "localhost:5000"
+logging = "actix_web=info,actix_redis=info"
+redis_addr = "localhost:6379"
