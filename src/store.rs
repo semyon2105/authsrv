@@ -3,6 +3,7 @@ use actix_redis::{Command, Error as ActixError, RedisActor};
 use futures::{Future, future, future::{Either, FutureResult}};
 use rand::{Rng, RngCore};
 use redis_async::{resp::RespValue};
+use reqwest::{get as http_get};
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -18,6 +19,11 @@ pub struct Account {
 pub struct Secret {
     pub hash: Vec<u8>,
     pub salt: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+pub struct FbQueryResponse {
+    pub id: String,
 }
 
 impl Secret {
@@ -149,6 +155,13 @@ pub fn try_get_token(redis: Addr<RedisActor>, login: &str, secret: &str)
                 };
             fut
         })
+}
+
+pub fn get_fb_identity(fb_token: &str) -> Option<FbQueryResponse> {
+    let fb_request_url = format!("https://graph.facebook.com/v3.1/me?fields=id%2Cname&access_token={}", fb_token);
+    let response: Result<FbQueryResponse, _> =
+        http_get(&fb_request_url).and_then(|mut res| res.json());
+    response.ok()
 }
 
 fn get_or_update_token(redis: Addr<RedisActor>, account: &Account, expected_secret: &str)

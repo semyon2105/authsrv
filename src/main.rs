@@ -6,6 +6,7 @@ extern crate env_logger;
 extern crate futures;
 extern crate rand;
 #[macro_use] extern crate redis_async;
+extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
 extern crate sha2;
@@ -24,15 +25,23 @@ use actix_web::{
     server,
     App,
     AsyncResponder,
+    Either,
     FutureResponse,
     HttpRequest,
+    HttpResponse,
     Json,
     Responder,
 };
-use futures::{Future};
+use futures::Future;
 use rand::OsRng;
 use settings::Settings;
-use store::{GetTokenResult, try_add_account, try_get_token};
+use store::{
+    FbQueryResponse,
+    GetTokenResult,
+    get_fb_identity,
+    try_add_account,
+    try_get_token
+};
 
 #[derive(Deserialize)]
 struct AuthRequest {
@@ -47,6 +56,16 @@ struct AuthResponse(GetTokenResult);
 struct SignupRequest {
     login: String,
     secret: String,
+}
+
+#[derive(Deserialize)]
+struct AuthRequestFb {
+    fb_token: String,
+}
+
+#[derive(Deserialize)]
+struct SignupRequestFb {
+    fb_token: String,
 }
 
 #[derive(Serialize)]
@@ -91,6 +110,53 @@ fn signup((body, req): (Json<SignupRequest>, HttpRequest<AppState>))
         .responder()
 }
 
+fn auth_fb((body, req): (Json<AuthRequestFb>, HttpRequest<AppState>))
+    -> impl Responder {
+    
+    let redis = req.state().redis.clone();
+
+    let AuthRequestFb { fb_token } = body.into_inner();
+    let fb_id_result = get_fb_identity(&fb_token);
+
+    match fb_id_result {
+        None => Either::A(
+            HttpResponse::NotFound()
+        ),
+        Some(FbQueryResponse { id }) => Either::B(
+            try_get_token(redis, &id, "")
+                .map(|token_result| Json(AuthResponse(token_result)))
+                .map_err(ErrorInternalServerError)
+                .responder()
+        ),
+    }
+}
+
+fn signup_fb((body, req): (Json<SignupRequestFb>, HttpRequest<AppState>))
+    -> impl Responder {
+
+    let redis = req.state().redis.clone();
+    let mut rng = req.state().rng.clone();
+
+    let SignupRequestFb { fb_token } = body.into_inner();
+    let fb_id_result = get_fb_identity(&fb_token);
+
+    match fb_id_result {
+        None => Either::A(
+            HttpResponse::NotFound()
+        ),
+        Some(FbQueryResponse { id }) => Either::B(
+            try_add_account(redis, &mut rng, &id, "")
+                .map(|was_added|
+                    match was_added {
+                        false => Json(SignupResponse::UserAlreadyExists(id)),
+                        true => Json(SignupResponse::Ok),
+                    })
+                .map_err(ErrorInternalServerError)
+                .responder()
+        ),
+    }
+}
+
 fn main() {
     let Settings {
         listen_addr,
@@ -113,6 +179,8 @@ fn main() {
             .middleware(Logger::default())
             .resource("/auth", |r| r.method(Method::POST).with(auth))
             .resource("/signup", |r| r.method(Method::POST).with(signup))
+            .resource("/fb/auth", |r| r.method(Method::POST).with(auth_fb))
+            .resource("/fb/signup", |r| r.method(Method::POST).with(signup_fb))
     })
         .bind(listen_addr)
         .unwrap()
