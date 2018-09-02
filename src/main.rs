@@ -10,12 +10,13 @@ extern crate serde;
 extern crate serde_json;
 extern crate sha2;
 #[macro_use] extern crate serde_derive;
+extern crate uuid;
 
 mod settings;
 mod store;
 
 use actix::{Addr, System};
-use actix_redis::{Command, RedisActor};
+use actix_redis::{RedisActor};
 use actix_web::{
     error::{ErrorInternalServerError},
     http::{Method},
@@ -28,22 +29,30 @@ use actix_web::{
     Json,
     Responder,
 };
-use futures::{Future, future::FutureResult};
+use futures::{Future};
 use rand::OsRng;
-use redis_async::resp::RespValue;
 use settings::Settings;
-use store::{Account, Secret};
+use store::{GetTokenResult, try_add_account, try_get_token};
+
+#[derive(Deserialize)]
+struct AuthRequest {
+    login: String,
+    secret: String,
+}
+
+#[derive(Serialize)]
+struct AuthResponse(GetTokenResult);
 
 #[derive(Deserialize)]
 struct SignupRequest {
-    email: String,
-    password: String
+    login: String,
+    secret: String,
 }
 
 #[derive(Serialize)]
 enum SignupResponse {
     Ok,
-    UserAlreadyExists(String)
+    UserAlreadyExists(String),
 }
 
 struct AppState {
@@ -51,46 +60,34 @@ struct AppState {
     rng: OsRng,
 }
 
-fn auth(_req: HttpRequest<AppState>) -> impl Responder {
-    ""
+fn auth((body, req): (Json<AuthRequest>, HttpRequest<AppState>))
+    -> FutureResponse<impl Responder> {
+    
+    let redis = req.state().redis.clone();
+
+    let AuthRequest { login, secret } = body.into_inner();
+
+    try_get_token(redis, &login, &secret)
+        .map(|token_result| Json(AuthResponse(token_result)))
+        .map_err(ErrorInternalServerError)
+        .responder()
 }
 
 fn signup((body, req): (Json<SignupRequest>, HttpRequest<AppState>))
     -> FutureResponse<impl Responder> {
+
     let redis = req.state().redis.clone();
     let mut rng = req.state().rng.clone();
 
-    let SignupRequest { email, password } = body.into_inner();
+    let SignupRequest { login, secret } = body.into_inner();
 
-    let account = Account {
-        email: email.clone(),
-        secret: Secret::encode(&mut rng, &password),
-    };
-
-    let key = format!("users:{}", email);
-    let value_result: FutureResult<String, _> =
-        serde_json::to_string(&account)
-            .map_err(ErrorInternalServerError)
-            .into();
-
-    let was_inserted_result = value_result
-        .and_then(move |value|
-            redis.send(Command(resp_array!["SETNX", key, value]))
-                 .map_err(ErrorInternalServerError))
-        .and_then(|resp_value|
-            match resp_value {
-                Ok(RespValue::Integer(1)) => Ok(true),
-                Ok(RespValue::Integer(0)) => Ok(false),
-                Ok(_) => Ok(false),
-                Err(_) => Err(ErrorInternalServerError("")),
-            });
-
-    was_inserted_result
-        .map(|was_inserted|
-            match was_inserted {
-                false => Json(SignupResponse::UserAlreadyExists(email)),
+    try_add_account(redis, &mut rng, &login, &secret)
+        .map(|was_added|
+            match was_added {
+                false => Json(SignupResponse::UserAlreadyExists(login)),
                 true => Json(SignupResponse::Ok),
             })
+        .map_err(ErrorInternalServerError)
         .responder()
 }
 
@@ -114,7 +111,7 @@ fn main() {
 
         App::with_state(app_state)
             .middleware(Logger::default())
-            .resource("/auth", |r| r.method(Method::GET).with(auth))
+            .resource("/auth", |r| r.method(Method::POST).with(auth))
             .resource("/signup", |r| r.method(Method::POST).with(signup))
     })
         .bind(listen_addr)
