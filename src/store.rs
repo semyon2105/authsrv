@@ -92,6 +92,21 @@ impl fmt::Display for AddAccountError {
     }
 }
 
+pub fn get_auth_info(redis: Addr<RedisActor>, token: &str)
+    -> impl Future<Item = Option<String>, Error = ()> {
+
+    let token_key = get_redis_token_key(token);
+    let command = Command(resp_array!["GET", token_key]);
+
+    redis.send(command).map_err(|_| ())
+        .and_then(|resp_value|
+            match resp_value {
+                Ok(RespValue::BulkString(login_bytes)) =>
+                    Ok(Some(String::from_utf8(login_bytes).unwrap())),
+                _ => Ok(None),
+            })
+}
+
 pub fn try_add_account(redis: Addr<RedisActor>, rng: &mut RngCore, login: &str, secret: &str)
     -> impl Future<Item = bool, Error = AddAccountError> {
     
@@ -158,7 +173,7 @@ pub fn try_get_token(redis: Addr<RedisActor>, login: &str, secret: &str)
 }
 
 pub fn get_fb_identity(fb_token: &str) -> Option<FbQueryResponse> {
-    let fb_request_url = format!("https://graph.facebook.com/v3.1/me?fields=id%2Cname&access_token={}", fb_token);
+    let fb_request_url = format!("https://graph.facebook.com/v3.1/me?fields=id&access_token={}", fb_token);
     let response: Result<FbQueryResponse, _> =
         http_get(&fb_request_url).and_then(|mut res| res.json());
     response.ok()
@@ -173,15 +188,15 @@ fn get_or_update_token(redis: Addr<RedisActor>, account: &Account, expected_secr
             future::ok(GetTokenResult::InvalidCredentials(login.to_string()))
         ),
         true => {
-            let token_key = get_redis_token_key(login);
-            let token_value = Uuid::new_v4().hyphenated().to_string();
-            let command = Command(resp_array!["SETEX", token_key, "60", token_value.clone()]);
+            let token = Uuid::new_v4().hyphenated().to_string();
+            let token_key = get_redis_token_key(&token);
+            let command = Command(resp_array!["SETEX", token_key, "60", login.clone()]);
 
             let fut = redis.send(command)
                 .map_err(GetTokenError::MailboxError)
                 .and_then(move |resp_value|
                     match resp_value {
-                        Ok(RespValue::SimpleString(_)) => Ok(GetTokenResult::Token(token_value)),
+                        Ok(RespValue::SimpleString(_)) => Ok(GetTokenResult::Token(token)),
                         Ok(resp) => Err(GetTokenError::UnexpectedResp(resp)),
                         Err(e) => Err(GetTokenError::ActixError(e)),
                     });
@@ -195,8 +210,8 @@ fn get_redis_account_key(login: &str) -> String {
     format!("accounts:{}", login)
 }
 
-fn get_redis_token_key(login: &str) -> String {
-    format!("tokens:{}", login)
+fn get_redis_token_key(token: &str) -> String {
+    format!("tokens:{}", token)
 }
 
 #[cfg(test)]

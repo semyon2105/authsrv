@@ -30,6 +30,7 @@ use actix_web::{
     HttpRequest,
     HttpResponse,
     Json,
+    Path,
     Responder,
 };
 use futures::Future;
@@ -38,6 +39,7 @@ use settings::Settings;
 use store::{
     FbQueryResponse,
     GetTokenResult,
+    get_auth_info,
     get_fb_identity,
     try_add_account,
     try_get_token
@@ -79,7 +81,7 @@ struct AppState {
     rng: OsRng,
 }
 
-fn auth((body, req): (Json<AuthRequest>, HttpRequest<AppState>))
+fn signin((body, req): (Json<AuthRequest>, HttpRequest<AppState>))
     -> FutureResponse<impl Responder> {
     
     let redis = req.state().redis.clone();
@@ -110,7 +112,7 @@ fn signup((body, req): (Json<SignupRequest>, HttpRequest<AppState>))
         .responder()
 }
 
-fn auth_fb((body, req): (Json<AuthRequestFb>, HttpRequest<AppState>))
+fn signin_fb((body, req): (Json<AuthRequestFb>, HttpRequest<AppState>))
     -> impl Responder {
     
     let redis = req.state().redis.clone();
@@ -157,6 +159,21 @@ fn signup_fb((body, req): (Json<SignupRequestFb>, HttpRequest<AppState>))
     }
 }
 
+fn test_auth((auth_token, req): (Path<String>, HttpRequest<AppState>))
+    -> impl Responder {
+
+    let redis = req.state().redis.clone();
+
+    get_auth_info(redis, &auth_token)
+        .map(|info|
+            match info {
+                None => Either::A(HttpResponse::NotFound()),
+                Some(login) => Either::B(login),
+            })
+        .map_err(|_| ErrorInternalServerError(""))
+        .responder()
+}
+
 fn main() {
     let Settings {
         listen_addr,
@@ -177,10 +194,11 @@ fn main() {
 
         App::with_state(app_state)
             .middleware(Logger::default())
-            .resource("/auth", |r| r.method(Method::POST).with(auth))
+            .resource("/signin", |r| r.method(Method::POST).with(signin))
             .resource("/signup", |r| r.method(Method::POST).with(signup))
-            .resource("/fb/auth", |r| r.method(Method::POST).with(auth_fb))
+            .resource("/fb/signin", |r| r.method(Method::POST).with(signin_fb))
             .resource("/fb/signup", |r| r.method(Method::POST).with(signup_fb))
+            .resource("/test_auth/{auth_token}", |r| r.method(Method::GET).with(test_auth))
     })
         .bind(listen_addr)
         .unwrap()
