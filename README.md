@@ -1,7 +1,5 @@
 # authsrv
 
-Demo available at https://trihard.online
-
 API
 ===
 
